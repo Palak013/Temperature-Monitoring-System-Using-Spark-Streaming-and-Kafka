@@ -1,60 +1,69 @@
+import org.apache.spark.sql.{SparkSession}
+import org.apache.spark.sql.functions._
+import org.apache.spark.sql.types._
+import org.apache.spark.sql.streaming.Trigger
 
-import org.apache.kafka.clients.consumer.KafkaConsumer
-import org.apache.kafka.common.serialization.StringDeserializer
-import org.apache.spark.sql.SparkSession
-import org.apache.spark.streaming.{Seconds, StreamingContext}
-import org.apache.spark.streaming.kafka010._
-
-object TemperatureMonitoring {
+object TemperatureMonitor {
   def main(args: Array[String]): Unit = {
 
-    // Create a SparkSession
-    val spark = SparkSession.builder
-      .appName("TemperatureMonitoring")
+    val spark = SparkSession.builder()
+      .appName("IoT Temperature Monitor with Kafka")
       .master("local[*]")
       .getOrCreate()
 
-    // Set up Kafka consumer parameters
-    val kafkaParams = Map(
-      "bootstrap.servers" -> "localhost:9092",
-      "key.deserializer" -> classOf[StringDeserializer],
-      "value.deserializer" -> classOf[StringDeserializer],
-      "group.id" -> "temperature-monitoring-group",
-      "auto.offset.reset" -> "earliest"
-    )
+    spark.sparkContext.setLogLevel("WARN")
 
-    // Create a streaming context
-    val ssc = new StreamingContext(spark.sparkContext, Seconds(5))
+    // Kafka configuration
+    val kafkaBootstrapServers = "localhost:9092"
+    val inputTopic = "temperature-sensors"
+    val outputTopic = "alert-temperature"
 
-    // Subscribe to the Kafka topic
-    val topics = Array("temperature-sensors")
-    val kafkaStream = KafkaUtils.createDirectStream[String, String](
-      ssc,
-      LocationStrategies.PreferConsistent,
-      ConsumerStrategies.Subscribe[String, String](topics, kafkaParams)
-    )
+    // Define schema for incoming JSON
+    val schema = new StructType()
+      .add("sensor_id", StringType)
+      .add("room_id", StringType)
+      .add("timestamp", StringType)
+      .add("temp", DoubleType)
+      .add("location", StringType)
 
-    // Process Kafka stream and filter for high temperatures
-    kafkaStream.foreachRDD { rdd =>
-      val data = rdd.map(record => {
-        val value = record.value()
-        val json = ujson.read(value)
-        val sensorId = json("sensor_id").str
-        val temp = json("temp").num
-        (sensorId, temp)
-      })
+    // Read stream from Kafka
+    val kafkaStreamDF = spark.readStream
+      .format("kafka")
+      .option("kafka.bootstrap.servers", kafkaBootstrapServers)
+      .option("subscribe", inputTopic)
+      .load()
 
-      val highTempData = data.filter(_._2 > 80)
+    // Extract JSON string
+    val messageDF = kafkaStreamDF.selectExpr("CAST(value AS STRING) AS message")
 
-      highTempData.foreachPartition { partitionOfRecords =>
-        partitionOfRecords.foreach { case (sensorId, temp) =>
-          println(s"High temperature alert! Sensor: $sensorId, Temperature: $temp")
-        }
-      }
-    }
+    // Parse JSON and apply schema
+    val tempDF = messageDF
+      .select(from_json(col("message"), schema).as("data"))
+      .select("data.*")
 
-    // Start the streaming context
-    ssc.start()
-    ssc.awaitTermination()
+    // Filter high temperatures and categorize
+    val highTempDF = tempDF
+      .filter($"temp" > 80.0)
+      .withColumn("alert_level",
+        when($"temp" > 90, "CRITICAL")
+        .when($"temp" > 85, "SEVERE")
+        .otherwise("WARNING"))
+      .withColumn("processing_time", current_timestamp())
+
+    // Prepare output for Kafka
+    val kafkaOutputDF = highTempDF
+      .selectExpr("CAST(sensor_id AS STRING) AS key", "to_json(struct(*)) AS value")
+
+    // Write to Kafka output topic
+    val query = kafkaOutputDF.writeStream
+      .outputMode("append")
+      .format("kafka")
+      .option("kafka.bootstrap.servers", kafkaBootstrapServers)
+      .option("topic", outputTopic)
+      .option("checkpointLocation", "file:///tmp/spark-kafka-checkpoint") // use a valid path
+      .trigger(Trigger.ProcessingTime("10 seconds"))
+      .start()
+
+    query.awaitTermination()
   }
 }
