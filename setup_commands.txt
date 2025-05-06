@@ -1,0 +1,18 @@
+
+1. Download and install Apache Kafka on your system.
+2. Start ZooKeeper:
+   > .in\windows\zookeeper-server-start.bat .\config\zookeeper.properties
+3. Start Kafka broker:
+   > .in\windows\kafka-server-start.bat .\config\server.properties
+4. Create the topic "temperature-sensors":
+   > .in\windows\kafka-topics.bat --create --topic temperature-sensors --bootstrap-server localhost:9092 --partitions 1 --replication-factor 1
+5. Create the topic "alert-temperature" for filtered data:
+   > .in\windows\kafka-topics.bat --create --topic alert-temperature --bootstrap-server localhost:9092 --partitions 1 --replication-factor 1
+6. Run the Kafka producer to send temperature data:
+   > .in\windows\kafka-console-producer.bat --broker-list localhost:9092 --topic temperature-sensors
+7. Example data to send:
+   {"sensor_id":"s1", "room_id":"r1", "timestamp":"2025-05-07T01:00:00", "temp":88.5, "location":"Room A"}
+8. Start Spark Streaming job with the provided Scala code:
+   > spark-submit --class TemperatureMonitoring --master local[*] temperature-monitoring.jar
+9. Start Kafka consumer to read filtered high temperature data:
+   > .in\windows\kafka-console-consumer.bat --bootstrap-server localhost:9092 --topic alert-temperature --from-beginning
